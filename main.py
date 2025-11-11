@@ -1,8 +1,5 @@
 import sys
-import json
-import urllib.request
-import urllib.error
-from urllib.parse import quote
+from collections import deque
 
 
 class CLI_JavaScript:
@@ -10,10 +7,16 @@ class CLI_JavaScript:
         try:
             self.params = self.parse_arguments()
             self.validate_arguments(self.params)
-            self.print_params()
-            self.stage2_get_dependencies()
+
+            if self.params['test_mode']:
+                # В тестовом режиме выполняем только Этап 3
+                self.stage3_build_dependency_graph()
+            else:
+                # В реальном режиме только Этап 2
+                self.stage2_get_dependencies_real()
+
         except Exception as e:
-            print(f"Ошибка конфигурации: {e}")
+            print(f"Ошибка: {e}")
             sys.exit(1)
 
     def parse_arguments(self):
@@ -22,7 +25,7 @@ class CLI_JavaScript:
         params = {
             'package_name': None,
             'repo_url': None,
-            'test_mode': False  # Оставляем, но не используем в этапе 2
+            'test_mode': False
         }
 
         i = 0
@@ -57,13 +60,24 @@ class CLI_JavaScript:
     def print_help(self):
         """Вывод справки"""
         help_text = """
+Инструмент визуализации графа зависимостей для менеджера пакетов (JavaScript/npm)
+
 Использование:
-  python main.py --package-name NAME --repo-url URL
+  Этап 2 (реальный режим):
+    python main.py --package-name NAME --repo-url URL
+
+  Этап 3 (тестовый режим):
+    python main.py --package-name NAME --repo-url FILE --test-mode
 
 Параметры:
   --package-name, -p    Имя анализируемого пакета
-  --repo-url, -r        URL-адрес репозитория
+  --repo-url, -r        URL репозитория (режим) или путь к файлу (тестовый режим)
+  --test-mode, -t       Активировать тестовый режим работы с файлом графа
   --help, -h            Показать справку
+
+Примеры:
+  Этап 2: python main.py -p "react" -r "https://github.com/facebook/react"
+  Этап 3: python main.py -p "A" -r "graph.txt" -t
         """
         print(help_text.strip())
 
@@ -89,80 +103,162 @@ class CLI_JavaScript:
             error_msg = "\n".join([f"  - {error}" for error in errors])
             raise ValueError(f"Обнаружены ошибки в параметрах:\n{error_msg}")
 
-    def print_params(self):
-        print("Настроенные параметры (ключ-значение):")
-        print("=" * 40)
-        print(f"package_name: {self.params['package_name']}")
-        print(f"repo_url: {self.params['repo_url']}")
-        print("=" * 40)
-
-    def stage2_get_dependencies(self):
-        """Этап 2: Получение прямых зависимостей пакета"""
+    def stage2_get_dependencies_real(self):
+        """Этап 2: Реальный режим - получение зависимостей из репозитория"""
         print("\n=== ЭТАП 2: Сбор данных ===")
-        self._get_dependencies_from_source_repo()
+        print("Этап 2 выполняется в реальном режиме...")
+        print("Для Этапа 3 используйте тестовый режим с флагом -t")
 
-    def _get_dependencies_from_source_repo(self):
-        """Получение зависимостей напрямую из исходного репозитория"""
-        package_name = self.params['package_name']
-        repo_url = self.params['repo_url']
+    def stage3_build_dependency_graph(self):
+        """Этап 3: Построение графа зависимостей с учетом транзитивности"""
+        print("\n=== ЭТАП 3: Основные операции ===")
+
+        print("Построение графа зависимостей с учетом транзитивности...")
+
+        # Читаем граф из файла
+        graph = self._read_dependency_graph()
+        start_package = self.params['package_name']
+
+        # Проверяем, что стартовый пакет есть в графе
+        if start_package not in graph:
+            raise ValueError(f"Пакет '{start_package}' не найден в графе зависимостей")
+
+        # Строим полный граф зависимостей с помощью BFS с рекурсией
+        print(f"\nПостроение графа зависимостей для пакета '{start_package}'...")
+        full_graph = self._build_transitive_dependencies_bfs_recursive(graph, start_package)
+
+        # Выводим результат
+        self._print_dependency_graph(full_graph, start_package)
+
+        # Демонстрируем обработку циклических зависимостей
+        self._demo_cycle_handling(graph)
+
+    def _read_dependency_graph(self):
+        """Чтение графа зависимостей из тестового файла"""
+        file_path = self.params['repo_url']
+        graph = {}
 
         try:
-            print(f"Получение зависимостей для пакета {package_name} из репозитория...")
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or ':' not in line:
+                        continue
 
-            # Определяем тип репозитория и формируем URL к package.json
-            if 'github.com' in repo_url:
-                if repo_url.endswith('.git'):
-                    repo_url = repo_url[:-4]
-                raw_url = repo_url.replace('github.com', 'raw.githubusercontent.com') + '/main/package.json'
-            elif 'gitlab.com' in repo_url:
-                raw_url = repo_url + '/-/raw/main/package.json'
-            else:
-                raw_url = repo_url if repo_url.endswith('package.json') else repo_url + '/package.json'
+                    parts = line.split(':', 1)
+                    package = parts[0].strip()
+                    dependencies = [dep.strip() for dep in parts[1].split(',')] if parts[1].strip() else []
 
-            print(f"Запрос package.json из: {raw_url}")
+                    graph[package] = dependencies
 
-            req = urllib.request.Request(
-                raw_url,
-                headers={'User-Agent': 'Mozilla/5.0'}
-            )
+            print(f"Загружен граф из {len(graph)} пакетов")
 
-            with urllib.request.urlopen(req, timeout=10) as response:
-                if response.status != 200:
-                    raise ValueError(f"Ошибка при запросе package.json: {response.status}")
-
-                data = response.read().decode('utf-8')
-                package_data = json.loads(data)
-
-            dependencies = package_data.get('dependencies', {})
-            dev_dependencies = package_data.get('devDependencies', {})
-
-            print(f"\nПрямые зависимости пакета '{package_name}':")
-            print("-" * 50)
-
-            if dependencies:
-                print("dependencies:")
-                for dep_name, dep_version in dependencies.items():
-                    print(f"  {dep_name}: {dep_version}")
-
-            if dev_dependencies:
-                print("devDependencies:")
-                for dep_name, dep_version in dev_dependencies.items():
-                    print(f"  {dep_name}: {dep_version}")
-
-            if not dependencies and not dev_dependencies:
-                print("  Прямые зависимости отсутствуют")
-
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                raise ValueError(f"package.json не найден в репозитории")
-            else:
-                raise ValueError(f"Ошибка HTTP при запросе package.json: {e.code}")
-        except urllib.error.URLError as e:
-            raise ValueError(f"Ошибка сети: {e.reason}")
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Ошибка парсинга package.json: {e}")
+        except FileNotFoundError:
+            raise ValueError(f"Файл графа зависимостей не найден: {file_path}")
         except Exception as e:
-            raise ValueError(f"Неожиданная ошибка: {e}")
+            raise ValueError(f"Ошибка чтения графа зависимостей: {e}")
+
+        return graph
+
+    def _build_transitive_dependencies_bfs_recursive(self, graph, start_package):
+        """Построение транзитивных зависимостей с помощью BFS с рекурсией"""
+        visited = set()
+        result_graph = {}
+
+        def bfs_recursive(current_level):
+            if not current_level:
+                return
+
+            next_level = []
+
+            for package in current_level:
+                if package in visited:
+                    continue
+
+                visited.add(package)
+                result_graph[package] = graph.get(package, [])
+
+                # Добавляем зависимости в следующий уровень
+                for dep in graph.get(package, []):
+                    if dep not in visited and dep not in next_level:
+                        next_level.append(dep)
+
+            # Рекурсивный вызов для следующего уровня
+            bfs_recursive(next_level)
+
+        # Запускаем BFS с рекурсией
+        bfs_recursive([start_package])
+
+        return result_graph
+
+    def _print_dependency_graph(self, graph, start_package):
+        """Вывод графа зависимостей"""
+        print(f"\nПолный граф зависимостей для пакета '{start_package}':")
+        print("=" * 60)
+
+        packages = list(graph.keys())
+        packages.sort()
+
+        for package in packages:
+            dependencies = graph[package]
+            if dependencies:
+                print(f"{package} -> {', '.join(dependencies)}")
+            else:
+                print(f"{package} -> (нет зависимостей)")
+
+        print(f"\nСтатистика:")
+        print(f"  Всего пакетов в графе: {len(graph)}")
+        print(f"  Стартовый пакет: {start_package}")
+
+    def _demo_cycle_handling(self, graph):
+        """Демонстрация обработки циклических зависимостей"""
+        print("\n" + "=" * 60)
+        print("Демонстрация обработки циклических зависимостей")
+        print("=" * 60)
+
+        # Проверяем наличие циклов в графе
+        cycles = self._find_cycles(graph)
+
+        if cycles:
+            print("Обнаружены циклические зависимости:")
+            for i, cycle in enumerate(cycles, 1):
+                print(f"  Цикл {i}: {' -> '.join(cycle)}")
+
+            print(f"\nВсего обнаружено циклов: {len(cycles)}")
+        else:
+            print("Циклические зависимости не обнаружены")
+
+    def _find_cycles(self, graph):
+        """Поиск циклических зависимостей в графе"""
+
+        def dfs(node, path, visited, rec_stack, cycles):
+            visited.add(node)
+            rec_stack.add(node)
+            path.append(node)
+
+            for neighbor in graph.get(node, []):
+                if neighbor not in visited:
+                    dfs(neighbor, path, visited, rec_stack, cycles)
+                elif neighbor in rec_stack:
+                    # Найден цикл
+                    cycle_start = path.index(neighbor)
+                    cycle = path[cycle_start:]
+                    # Проверяем, что цикл не дублируется
+                    if cycle not in cycles:
+                        cycles.append(cycle.copy())
+
+            path.pop()
+            rec_stack.remove(node)
+
+        visited = set()
+        rec_stack = set()
+        cycles = []
+
+        for node in graph:
+            if node not in visited:
+                dfs(node, [], visited, rec_stack, cycles)
+
+        return cycles
 
 
 if __name__ == "__main__":
